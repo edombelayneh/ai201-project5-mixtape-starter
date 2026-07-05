@@ -31,3 +31,17 @@ The real work lives in `services/`:
 **How I reproduced it:** Seeded the database (`python seed_data.py`), which creates three playlists of 7 songs each. Hitting `GET /playlists/857c9f3d-e362-46f2-94c0-26efc3384ddc/songs` (the "Late Night Vibes" playlist) in the browser returned only 6 song objects instead of the 7 stored in the DB. Confirmed the true count by querying `playlist_entries` directly (7). The unit test `test_playlist_returns_all_songs` also failed with `assert 4 == 5` on a 5-song fixture.
 
 **The fix:** Return all songs (`songs[:]`) instead of `songs[:-1]`. Re-running the endpoint now returns all 7, and the test passes.
+
+### Bug 2 — Listening streaks reset on Sundays
+
+**Location:** `services/streak_service.py`, `update_listening_streak()`
+
+**The bug:** The consecutive-day branch was gated by an extra clause: `elif days_since_last == 1 and today.weekday() != 6:`. Since `weekday()` returns 6 for Sunday, any streak that continued onto a Sunday skipped the increment and fell into the `else`, which reset the streak to 1.
+
+**Root cause:** The `and today.weekday() != 6` condition had nothing to do with streak logic. The docstring states the rule with no exceptions ("If the user listened yesterday: streak increments by 1"), so the day of the week should never matter. A user who listened Saturday and again Sunday had their streak wiped instead of extended.
+
+**Expected behavior:** Listening on consecutive calendar days increments the streak by 1, regardless of which day of the week it is.
+
+**How I reproduced it:** Today's date happened to be a Sunday, so I could trigger it against the real clock. I set user "nova" to `last_listened_at = Saturday` with `listening_streak = 5`, then recorded a listen for today via `POST /songs/<song_id>/listen` and read back `GET /users/<user_id>/streak`. The buggy version returned a streak of **1** (reset) instead of the expected **6**. The unit test `test_streak_increments_on_sunday` also failed with `assert 1 == 2` for a Saturday→Sunday sequence.
+
+**The fix:** Remove the `and today.weekday() != 6` clause so the branch is simply `elif days_since_last == 1:`. After resetting nova back to the Saturday state and repeating the listen, the streak correctly incremented to **6**, and the test passes.
