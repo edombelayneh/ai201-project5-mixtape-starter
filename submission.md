@@ -1,3 +1,16 @@
+# AI Usage
+
+I used an AI assistant (Claude Code) as a collaborator, but verified its output myself by running the endpoints, the test suite, and direct DB queries rather than trusting explanations.
+
+**Where it helped:** It walked me through the `services/` directory and flagged the two planted bugs while doing so. It explained each bug's root cause clearly — why `[:-1]` drops a row, why `weekday() != 6` singles out Sunday, why appending through the ORM relationship left the `NOT NULL` `position`/`added_by` columns empty, and why `rate_song` fired no notification. It also traced the notification paths and spotted that the `'song_rated'` type was referenced in a docstring but used nowhere — which turned a "maybe missing feature" into a confirmed bug. And it built me an interactive browser console (served by Flask) to test the app as a real user, which is how I found bugs 3 and 4.
+
+**Where it was wrong or incomplete, and I caught it by testing:**
+- Its first example command used `?query=`; running it showed the real parameter was `q`.
+- Its live repro of the Sunday streak bug didn't work at first (streak "stuck at 1") — it hadn't accounted for the earlier run already stamping `last_listened_at` to today. We needed to reset that state first.
+- For the playlist bug it first said *every* add crashes. Clicking around myself, I found that re-adding a song already in a playlist didn't crash — it falsely reported success and sent a phantom notification. That second defect was mine to surface; the final fix covers both.
+
+---
+
 # Mixtape — Codebase Map
 
 Mixtape is a Flask app where people share songs, build collaborative playlists, and see what their friends are listening to. It's organized in layers: routes handle HTTP, services hold the actual logic, and models define the database.
