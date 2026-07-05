@@ -45,3 +45,28 @@ The real work lives in `services/`:
 **How I reproduced it:** Today's date happened to be a Sunday, so I could trigger it against the real clock. I set user "nova" to `last_listened_at = Saturday` with `listening_streak = 5`, then recorded a listen for today via `POST /songs/<song_id>/listen` and read back `GET /users/<user_id>/streak`. The buggy version returned a streak of **1** (reset) instead of the expected **6**. The unit test `test_streak_increments_on_sunday` also failed with `assert 1 == 2` for a Saturday→Sunday sequence.
 
 **The fix:** Remove the `and today.weekday() != 6` clause so the branch is simply `elif days_since_last == 1:`. After resetting nova back to the Saturday state and repeating the listen, the streak correctly incremented to **6**, and the test passes.
+
+### Bug 3 — Adding a song to a playlist crashes, and duplicates report a false success
+
+This bug had two parts, both in `services/notification_service.py`, `add_to_playlist()`.
+
+**How I found it:** To test the app end-to-end as a real user, I had the AI assistant build an interactive browser test console (a single HTML page served by Flask at `/`, plus small read-only `/dev/` helper endpoints to populate dropdowns). The console lets me act as any seeded user and exercise every endpoint — search, listen, rate, view feeds/streaks/notifications, and add songs to playlists — while a response log shows the raw HTTP status and JSON for each action. Clicking the **"+ Playlist"** button is what surfaced this bug.
+
+**What I observed in the console:**
+1. Adding a song that was **not** already in a playlist failed with a client-side `SyntaxError: Unexpected token '<', "<!doctype "... is not valid JSON`. (The server was actually returning a 500 HTML error page, which the console tried to parse as JSON.)
+2. Adding a song that was **already** in the playlist returned a success message ("Song added to playlist"), but the playlist's song count never changed on a later check.
+
+**Root cause (part A — the crash):** The code added songs via the ORM relationship (`playlist.songs.append(song)`). The `playlist_entries` association table has two `NOT NULL` columns — `position` and `added_by` — that the relationship append doesn't populate, so the insert violated the `NOT NULL` constraint on `position` and raised `sqlite3.IntegrityError`, surfacing as a 500.
+
+**Root cause (part B — the false success):** The `if song not in playlist.songs:` guard correctly skipped re-adding a duplicate, but the success return and the "notify the sharer" block below it ran **unconditionally**. So a duplicate add reported success *and* generated a phantom "X added your song" notification, even though nothing was added.
+
+**Expected behavior:** A new song is appended at the next position with `added_by` recorded, and the sharer is notified. A song already in the playlist is left unchanged, with no notification and an honest "already in playlist" response.
+
+**How I reproduced it (outside the console, to confirm root cause):** POSTed to `/playlists/857c9f3d-.../songs` (Late Night Vibes) with a song not in the playlist → got the `IntegrityError: NOT NULL constraint failed: playlist_entries.position` traceback. Then POSTed a song already in the playlist as a different user → response was `201 "Song added to playlist"`, the entry count stayed at 7, and the sharer's notification count went from 0 to 1 (the phantom notification).
+
+**The fix:**
+- Insert into `playlist_entries` explicitly, computing `position` as the current max position + 1 and passing `added_by`, instead of appending through the relationship.
+- Check for an existing entry first and return early (a new `bool` return: `True` if added, `False` if already present) so the notification only fires on a genuine add.
+- Update the route to return `201 "Song added to playlist"` when added and `200 "Song already in playlist"` otherwise.
+
+After the fix: adding a new song to Late Night Vibes moved the count 7 → 8 (new song at position 8, sharer notified), and re-adding it returned `200 "Song already in playlist"` with the count and notification count unchanged. All 13 tests still pass.

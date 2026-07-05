@@ -48,7 +48,9 @@ def add_song(playlist_id):
     if not song_id or not added_by:
         return jsonify({"error": "song_id and added_by are required"}), 400
     try:
-        add_to_playlist(playlist_id, song_id, added_by)
-        return jsonify({"message": "Song added to playlist"}), 201
+        added = add_to_playlist(playlist_id, song_id, added_by)
+        if added:
+            return jsonify({"message": "Song added to playlist"}), 201
+        return jsonify({"message": "Song already in playlist"}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

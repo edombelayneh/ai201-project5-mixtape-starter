@@ -6,8 +6,8 @@ Notifications are generated when friends interact with a user's shared songs.
 """
 
 from app import db
-from models import Notification, Song, User, Rating
-from sqlalchemy import desc
+from models import Notification, Song, User, Rating, playlist_entries
+from sqlalchemy import desc, func
 
 
 def create_notification(user_id: str, notification_type: str, body: str) -> Notification:
@@ -32,7 +32,7 @@ def create_notification(user_id: str, notification_type: str, body: str) -> Noti
     return notification
 
 
-def add_to_playlist(playlist_id: str, song_id: str, added_by_user_id: str) -> None:
+def add_to_playlist(playlist_id: str, song_id: str, added_by_user_id: str) -> bool:
     """
     Record that a user added a song to a playlist, and notify the song's sharer.
 
@@ -40,9 +40,12 @@ def add_to_playlist(playlist_id: str, song_id: str, added_by_user_id: str) -> No
         playlist_id: The ID of the playlist.
         song_id: The ID of the song being added.
         added_by_user_id: The ID of the user who added the song.
+
+    Returns:
+        True if the song was newly added, False if it was already in the
+        playlist (in which case nothing is changed and no notification is sent).
     """
     from models import Playlist
-    from services.playlist_service import get_playlist_songs
 
     song = db.session.get(Song, song_id)
     if not song:
@@ -56,10 +59,28 @@ def add_to_playlist(playlist_id: str, song_id: str, added_by_user_id: str) -> No
     if not playlist:
         raise ValueError(f"Playlist {playlist_id} not found")
 
-    # Add the song to the playlist
-    if song not in playlist.songs:
-        playlist.songs.append(song)
-        db.session.commit()
+    # Skip if the song is already in the playlist — nothing to add or notify.
+    already = db.session.query(playlist_entries).filter_by(
+        playlist_id=playlist_id, song_id=song_id
+    ).first()
+    if already:
+        return False
+
+    # Append at the next position. The playlist_entries table requires both
+    # position and added_by (NOT NULL), so we insert explicitly rather than
+    # appending through the relationship.
+    max_pos = db.session.query(func.max(playlist_entries.c.position)).filter_by(
+        playlist_id=playlist_id
+    ).scalar() or 0
+    db.session.execute(
+        playlist_entries.insert().values(
+            playlist_id=playlist_id,
+            song_id=song_id,
+            position=max_pos + 1,
+            added_by=added_by_user_id,
+        )
+    )
+    db.session.commit()
 
     # Notify the person who originally shared the song (if it wasn't them who added it)
     if song.shared_by != added_by_user_id:
@@ -68,6 +89,8 @@ def add_to_playlist(playlist_id: str, song_id: str, added_by_user_id: str) -> No
             notification_type="song_added_to_playlist",
             body=f"{adder.username} added your song '{song.title}' to the playlist '{playlist.name}'.",
         )
+
+    return True
 
 
 def rate_song(user_id: str, song_id: str, score: int) -> Rating:
