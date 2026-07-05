@@ -70,3 +70,24 @@ This bug had two parts, both in `services/notification_service.py`, `add_to_play
 - Update the route to return `201 "Song added to playlist"` when added and `200 "Song already in playlist"` otherwise.
 
 After the fix: adding a new song to Late Night Vibes moved the count 7 → 8 (new song at position 8, sharer notified), and re-adding it returned `200 "Song already in playlist"` with the count and notification count unchanged. All 13 tests still pass.
+
+### Bug 4 — Rating a song never notifies the sharer
+
+**Location:** `services/notification_service.py`, `rate_song()`
+
+**How I found it:** I set out to hunt specifically for notification problems using the test console, and had the AI assistant help trace the notification code paths. Grepping for `create_notification` showed it's called in exactly one place — `add_to_playlist` — and never in `rate_song`. I confirmed it in the console: acting as one user I rated another user's song (★ Rate), then switched the "Acting as" dropdown to the sharer and checked Notifications — nothing appeared.
+
+**What's wrong:** `rate_song` saves the rating and returns without ever calling `create_notification`, so the song's original sharer is never told their song was rated.
+
+**Why it's a bug (not just an unbuilt feature):** Three signals point to this being intended behavior that went missing:
+1. The module's top docstring says "Notifications are generated when friends interact with a user's shared songs" — rating is exactly that kind of interaction.
+2. `create_notification`'s own docstring lists `'song_rated'` as an example notification type, but that string appeared nowhere else in the codebase — a dangling reference to a notification that was supposed to exist.
+3. It's inconsistent with `add_to_playlist`, which does notify the sharer on interaction.
+
+**Expected behavior:** When a user rates another user's shared song, the sharer receives a `'song_rated'` notification (e.g. "darius rated your song 'Midnight Drive' 5 stars."). A user rating their own song should not self-notify, mirroring the `shared_by != added_by` guard in `add_to_playlist`. Per design decision, a notification fires on every rate action, including re-rating.
+
+**How I reproduced it:** `POST /songs/<song_id>/rate` with darius rating nova's song "Midnight Drive" 5 stars → rating saved (201), but nova's notification count stayed unchanged (1 → 1).
+
+**The fix:** Add a notification block at the end of `rate_song`, mirroring `add_to_playlist`: after the commit, if `song.shared_by != user_id`, create a `'song_rated'` notification for the sharer.
+
+After the fix, verified all three cases: another user rating → sharer notified (1 → 2); the same user re-rating with a new score → notified again (2 → 3, per the every-action decision); the sharer rating their own song → no notification (stayed 3). Notification body reads "darius rated your song 'Midnight Drive' 3 stars." All 13 tests still pass.
